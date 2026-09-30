@@ -139,9 +139,12 @@ class ConfigControl:
     # =========================================================
 
     # --- Setpoint del lazo primario (flujo) ------------------
-    # Ajustar al caudal deseado en la línea. 145 m3/h ≈ 54 Hz con
-    # la curva CURVA_ALIM. Cambiar si la operación pide otro valor.
-    FLUJO_SP: float = 145.0
+    # None  = MODO OVERRIDE PURO: dentro de banda el Hz no se mueve.
+    #         Solo el override de nivel puede cambiarlo.
+    # float = Hay setpoint de flujo. El lazo primario ajusta el Hz
+    #         para mantener ese caudal cuando el nivel esta en banda.
+    # Recomendado para PRIORIZAR ESTABILIDAD DEL FLUJO: None.
+    FLUJO_SP = None    # None -> Hz congelado en banda
 
     # --- Ganancias del lazo de flujo -------------------------
     # Proporcional lento sobre el error de flujo. La ganancia efectiva
@@ -435,12 +438,20 @@ class ControladorNivelFlujo:
         # 1) OVERRIDE por nivel (prioridad)
         aporte_n = self._aporte_nivel(nivel, pend_nivel)
 
-        # 2) LAZO PRIMARIO de FLUJO  -- solo si NO hay override
-        aporte_ref = 0.0     # feedforward del SP (Hz absoluto teórico)
-        aporte_f_err = 0.0   # P sobre error de flujo
-        aporte_f_pnd = 0.0   # amortiguamiento por pendiente
+        # 2) LAZO PRIMARIO de FLUJO -- solo si:
+        #    (a) override apagado,
+        #    (b) etapa identificada,
+        #    (c) hay descarga real o estamos en arranque de alim,
+        #    (d) hay setpoint de flujo definido (FLUJO_SP no es None).
+        # Con FLUJO_SP=None estamos en modo OVERRIDE PURO: el Hz queda
+        # congelado dentro de banda, solo se mueve por override.
+        aporte_ref = 0.0
+        aporte_f_err = 0.0
+        aporte_f_pnd = 0.0
         hz_ref = None
-        if aporte_n == 0.0 and self.abierta is not None and (not self.sin_descarga or en_arranque_alim):
+        if (aporte_n == 0.0 and self.abierta is not None
+                and cfg.FLUJO_SP is not None
+                and (not self.sin_descarga or en_arranque_alim)):
             # feedforward: llevar el Hz "de golpe" cerca del que produce FLUJO_SP
             m, b = self._curva()
             hz_ref = float(np.clip((cfg.FLUJO_SP - b) / m + self.bias,
@@ -490,7 +501,7 @@ class ControladorNivelFlujo:
             print(
                 f"Pend flujo: {pend_flujo:7.2f} u/min | "
                 f"Nivel: {nivel:6.2f} ({pend_nivel:+5.1f} %/min) | "
-                f"Flujo: {flujo:6.1f} (SP {cfg.FLUJO_SP:.0f}) | "
+                f"Flujo: {flujo:6.1f} (SP {cfg.FLUJO_SP if cfg.FLUJO_SP is not None else '--'}) | "
                 f"Hz: {self.hz_actual:6.2f} | "
                 f"A.flujo: {aporte_f_total:+.3f} (err {aporte_f_err:+.3f} / "
                 f"pnd {aporte_f_pnd:+.3f} / ref {aporte_ref:+.3f}) | "
@@ -592,8 +603,12 @@ if len(idx_c) or len(idx_o):
     print(f"    Ultimo cambio de etapa hace {ult_evt:.0f} s -> {tipo}")
 if en_arranque_alim[-1]:
     print(f"    >> EN ARRANQUE DE ALIMENTACION: rate limit = {cfg.RATE_ARRANQUE_HZ} Hz/paso")
-print(f"    Objetivo del lazo primario: FLUJO_SP = {cfg.FLUJO_SP:.0f} m3/h "
-      f"(Hz teórico ~ {(cfg.FLUJO_SP - cfg.CURVA_ALIM[1]) / cfg.CURVA_ALIM[0]:.1f} en alim)")
+if cfg.FLUJO_SP is None:
+    print("    MODO OVERRIDE PURO: Hz congelado dentro de banda")
+    print("    -> Hz solo se mueve por override de nivel (fuera de banda)")
+else:
+    print(f"    Objetivo del lazo primario: FLUJO_SP = {cfg.FLUJO_SP:.0f} m3/h "
+          f"(Hz teorico ~ {(cfg.FLUJO_SP - cfg.CURVA_ALIM[1]) / cfg.CURVA_ALIM[0]:.1f} en alim)")
 
 registros = []
 for i, (ts, fila) in enumerate(df.iterrows()):
