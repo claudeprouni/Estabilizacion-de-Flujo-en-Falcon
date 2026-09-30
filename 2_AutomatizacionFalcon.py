@@ -197,8 +197,12 @@ class ConfigControl:
     T_BIAS_MIN: float = 20.0      # min para responder a un error sostenido
     BIAS_MAX_HZ: float = 3.0
 
-    # Congelar el SP durante la maniobra de válvula.
-    VENTANA_TRANSICION_SEG: int = 120
+    # Congelar el SP durante el CIERRE de la valvula (flujo se cae de golpe).
+    # En la APERTURA no se congela: se arranca con rate limit alto para
+    # pre-posicionar la bomba al Hz que produce FLUJO_SP sin esperar 2-3 min.
+    VENTANA_TRANSICION_SEG: int = 120     # solo cierre: freeze el SP
+    VENTANA_ARRANQUE_SEG:   int = 60      # apertura: rate limit alto durante 60 s
+    RATE_ARRANQUE_HZ:      float = 2.0    # Hz max por paso durante ARRANQUE (vs 0.4 normal)
 
     # --- Detección de tendencia de flujo (amortiguamiento) --
     # Se mantiene como en la versión anterior: solo actúa cuando
@@ -408,6 +412,7 @@ class ControladorNivelFlujo:
     # ---- ciclo de control ----
     def paso(self, timestamp_seg: float, nivel: float, flujo: float,
              abierta=None, en_transicion: bool = False,
+             en_arranque_alim: bool = False,
              verbose: bool = True) -> dict:
         cfg = self.cfg
         self.abierta = abierta
@@ -435,7 +440,7 @@ class ControladorNivelFlujo:
         aporte_f_err = 0.0   # P sobre error de flujo
         aporte_f_pnd = 0.0   # amortiguamiento por pendiente
         hz_ref = None
-        if aporte_n == 0.0 and self.abierta is not None and not self.sin_descarga:
+        if aporte_n == 0.0 and self.abierta is not None and (not self.sin_descarga or en_arranque_alim):
             # feedforward: llevar el Hz "de golpe" cerca del que produce FLUJO_SP
             m, b = self._curva()
             hz_ref = float(np.clip((cfg.FLUJO_SP - b) / m + self.bias,
@@ -460,8 +465,10 @@ class ControladorNivelFlujo:
 
         delta_solicitado = aporte_n + aporte_ref + aporte_f_err + aporte_f_pnd
 
-        # rate limit
-        rate = self._rate_limit(nivel, pend_nivel)
+        # rate limit: si estamos en arranque de alimentacion, permitir
+        # un paso mucho mas grande para saltar directo al Hz teorico.
+        rate_normal = self._rate_limit(nivel, pend_nivel)
+        rate = max(rate_normal, cfg.RATE_ARRANQUE_HZ) if en_arranque_alim else rate_normal
         delta = float(np.clip(delta_solicitado, -rate, rate))
 
         # congelar durante maniobra de válvula
@@ -490,6 +497,7 @@ class ControladorNivelFlujo:
                 f"A.nivel: {aporte_n:+.3f} | "
                 f"bias {self.bias:+.2f} | rate {rate:.2f}"
                 + ("  [TRANSICION-CONGELADO]" if en_transicion else "")
+                + ("  [ARRANQUE-ALIM]" if en_arranque_alim else "")
                 + ("" if self.abierta is None else
                    ("  [ALIMENTACION]" if self.abierta else "  [COSECHA]"))
                 + ("  [SIN DESCARGA]" if self.sin_descarga else "")
@@ -547,24 +555,42 @@ except Exception:
 ctrl = ControladorNivelFlujo(cfg, hz_inicial=df["Hz_05"].iloc[0],
                               estado_override=estado_override_prev, bias=_bias)
 
-# etapa vigente + ventana de transición
+# etapa vigente + ventanas de transicion.
+# CIERRE  (alim -> cosecha): flujo se cae -> CONGELAR SP 2 min.
+# APERTURA (cosecha -> alim): rate limit alto 60 s para saltar al Hz teorico
+# sin esperar la rampa lenta (arreglo del bug "flujo a 0 los primeros 3 min").
 val = pd.to_numeric(df["Cond_FCON"], errors="coerce")
 abierta = val.eq(cfg.VALOR_VALVULA_ABIERTA)
-cambio = np.asarray(abierta.ne(abierta.shift()), dtype=bool).copy()
-cambio[0] = False
-seg_desde_cambio = np.full(len(df), 1e9)
-idx_cambio = np.where(cambio)[0]
-if len(idx_cambio):
-    ult = idx_cambio[-1]
-    seg_desde_cambio[ult:] = (np.arange(len(df) - ult)) * cfg.PASO_SEG
-en_transicion = seg_desde_cambio < cfg.VENTANA_TRANSICION_SEG
+abierta_prev = abierta.shift(fill_value=False)
+just_closed = ((~abierta) & abierta_prev).to_numpy()
+just_opened = (abierta & (~abierta_prev)).to_numpy()
+just_closed[0] = False
+just_opened[0] = False
+
+seg_desde_cierre   = np.full(len(df), 1e9)
+seg_desde_apertura = np.full(len(df), 1e9)
+idx_c = np.where(just_closed)[0]
+idx_o = np.where(just_opened)[0]
+if len(idx_c):
+    u = idx_c[-1]
+    seg_desde_cierre[u:]   = np.arange(len(df) - u) * cfg.PASO_SEG
+if len(idx_o):
+    u = idx_o[-1]
+    seg_desde_apertura[u:] = np.arange(len(df) - u) * cfg.PASO_SEG
+
+en_transicion    = seg_desde_cierre   < cfg.VENTANA_TRANSICION_SEG   # solo cierre
+en_arranque_alim = seg_desde_apertura < cfg.VENTANA_ARRANQUE_SEG     # solo apertura
 
 print(f"\n => Set point de frecuencia enviado a las {now}")
 print(f"    Válvula 330HV4020: valor crudo = {val.iloc[-1]} -> "
       f"{'ALIMENTACION (abierta)' if abierta.iloc[-1] else 'COSECHA (cerrada)'}"
       f"   [invertir VALOR_VALVULA_ABIERTA si sale al revés]")
-if len(idx_cambio):
-    print(f"    Último cambio de etapa hace {seg_desde_cambio[-1]:.0f} s")
+if len(idx_c) or len(idx_o):
+    ult_evt = min(seg_desde_cierre[-1], seg_desde_apertura[-1])
+    tipo = "APERTURA (arranque de alim)" if seg_desde_apertura[-1] < seg_desde_cierre[-1] else "CIERRE (a cosecha)"
+    print(f"    Ultimo cambio de etapa hace {ult_evt:.0f} s -> {tipo}")
+if en_arranque_alim[-1]:
+    print(f"    >> EN ARRANQUE DE ALIMENTACION: rate limit = {cfg.RATE_ARRANQUE_HZ} Hz/paso")
 print(f"    Objetivo del lazo primario: FLUJO_SP = {cfg.FLUJO_SP:.0f} m3/h "
       f"(Hz teórico ~ {(cfg.FLUJO_SP - cfg.CURVA_ALIM[1]) / cfg.CURVA_ALIM[0]:.1f} en alim)")
 
@@ -579,6 +605,7 @@ for i, (ts, fila) in enumerate(df.iterrows()):
         flujo=fila["Flujo_FCON"],
         abierta=bool(abierta.iloc[i]),
         en_transicion=bool(en_transicion[i]),
+        en_arranque_alim=bool(en_arranque_alim[i]),
         verbose=(i >= len(df) - 4),
     )
     out["timestamp"] = ts
