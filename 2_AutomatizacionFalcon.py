@@ -150,7 +150,7 @@ class ConfigControl:
     #   K_FLUJO_ERROR en m3/h de "empuje" por m3/h de error, en ~1 min.
     #   Con 0.03 y curva CURVA_ALIM (10.4 m3/h/Hz), 10 m3/h de error
     #   piden ~0.03 Hz por paso: suave y sin sobreimpulso.
-    K_FLUJO_ERROR: float = 0.03
+    K_FLUJO_ERROR: float = 0.02           # bajado 0.03 -> 0.02: correccion mas lenta
 
     # --- Ganancias del lazo de nivel (override) --------------
     GANANCIA_NIVEL_ERROR: float = 0.25   # bajado 0.6 -> 0.25: menos chicoteo     # Hz por unidad de error de nivel
@@ -201,8 +201,8 @@ class ConfigControl:
     # En la APERTURA no se congela: se arranca con rate limit alto para
     # pre-posicionar la bomba al Hz que produce FLUJO_SP sin esperar 2-3 min.
     VENTANA_TRANSICION_SEG: int = 120     # solo cierre: freeze el SP
-    VENTANA_ARRANQUE_SEG:   int = 60      # apertura: rate limit alto durante 60 s
-    RATE_ARRANQUE_HZ:      float = 2.0    # Hz max por paso durante ARRANQUE (vs 0.4 normal)
+    VENTANA_ARRANQUE_SEG:   int = 90      # apertura: rate limit un poco mas alto durante 90 s
+    RATE_ARRANQUE_HZ:      float = 0.8    # bajado 2.0 -> 0.8: arranque suave, sin brincos
 
     # --- Detección de tendencia de flujo (amortiguamiento) --
     # Se mantiene como en la versión anterior: solo actúa cuando
@@ -220,7 +220,7 @@ class ConfigControl:
     VENTANA_NIVEL_SEG: int = 30
     PEND_NIVEL_SUAVE: float = 2.0
     PEND_NIVEL_AGRESIVA: float = 15.0
-    RATE_PENDIENTE_MAX_HZ: float = 3.0
+    RATE_PENDIENTE_MAX_HZ: float = 1.0    # bajado 3.0 -> 1.0: sin brincos por pendiente nivel
 
     # --- Anticipacion por velocidad de nivel (NUEVO) --------
     # El override antes solo miraba la POSICION del nivel: si venia
@@ -250,7 +250,7 @@ class ConfigControl:
     # Debajo de este error absoluto, el lazo primario NO mueve el Hz.
     # Combate el jitter de la medición de flujo (ruido ~2 m3/h) que
     # antes propagaba pequeñas correcciones cada 10 s.
-    ZONA_MUERTA_FLUJO_M3H: float = 3.0
+    ZONA_MUERTA_FLUJO_M3H: float = 6.0    # subido 3 -> 6: ignora ruido y micro variaciones
 
 
 # ------------------------------------------------------------------
