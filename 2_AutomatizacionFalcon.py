@@ -562,8 +562,9 @@ ctrl = ControladorNivelFlujo(cfg, hz_inicial=df["Hz_05"].iloc[0],
 val = pd.to_numeric(df["Cond_FCON"], errors="coerce")
 abierta = val.eq(cfg.VALOR_VALVULA_ABIERTA)
 abierta_prev = abierta.shift(fill_value=False)
-just_closed = ((~abierta) & abierta_prev).to_numpy()
-just_opened = (abierta & (~abierta_prev)).to_numpy()
+# .copy() para que el array sea escribible (en pandas nuevo to_numpy() devuelve vista solo-lectura)
+just_closed = ((~abierta) & abierta_prev).to_numpy().copy()
+just_opened = (abierta & (~abierta_prev)).to_numpy().copy()
 just_closed[0] = False
 just_opened[0] = False
 
