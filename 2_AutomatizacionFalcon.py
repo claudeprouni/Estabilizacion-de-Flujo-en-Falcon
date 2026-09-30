@@ -153,8 +153,8 @@ class ConfigControl:
     K_FLUJO_ERROR: float = 0.03
 
     # --- Ganancias del lazo de nivel (override) --------------
-    GANANCIA_NIVEL_ERROR: float = 0.6     # Hz por unidad de error de nivel
-    GANANCIA_NIVEL_VELOC: float = 0.8     # Hz por cada %/min de recuperación
+    GANANCIA_NIVEL_ERROR: float = 0.25   # bajado 0.6 -> 0.25: menos chicoteo     # Hz por unidad de error de nivel
+    GANANCIA_NIVEL_VELOC: float = 2.0    # subido 0.8 -> 2.0: mas freno al recuperar     # Hz por cada %/min de recuperación
 
     # Solo con override activo. 0 para desactivar el freno.
 
@@ -165,8 +165,8 @@ class ConfigControl:
     VALOR_VALVULA_ABIERTA: int = 1
 
     # Bandas para el override, por etapa.
-    BANDA_ALIM_LO: float = 40.0
-    BANDA_ALIM_HI: float = 68.0
+    BANDA_ALIM_LO: float = 35.0          # ampliado 40 -> 35: menos disparos falsos
+    BANDA_ALIM_HI: float = 78.0          # ampliado 68 -> 78: mas margen antes de override
     BANDA_COS_LO: float  = 40.0
     BANDA_COS_HI: float  = 90.0
     # Respaldo si aún no se identifica etapa
@@ -174,7 +174,7 @@ class ConfigControl:
     BANDA_HI: float = 75.0
 
     # Histéresis: entra en el borde, suelta al recuperar este margen.
-    HISTERESIS_BANDA_PCT: float = 2.0
+    HISTERESIS_BANDA_PCT: float = 4.0    # subido 2 -> 4: suelta con mas margen
 
     # Límites duros de seguridad (informativos).
     SEG_LO: float = 30.0
@@ -232,7 +232,7 @@ class ConfigControl:
     #   - nivel 68 %, cayendo    -> proyeccion adelantada -> suelta antes.
     # Solo se proyecta la pendiente que supera PEND_NIVEL_ALERTA (deadband
     # de velocidad), para que el ruido de la medicion no dispare overrides.
-    T_ANTICIPACION_MIN: float = 0.5   # min: horizonte de proyeccion (30 s)
+    T_ANTICIPACION_MIN: float = 0.25  # bajado 0.5 -> 0.25: menos anticipacion agresiva
     PEND_NIVEL_ALERTA:  float = 3.0   # %/min: umbral para activar anticipacion
 
     # --- Restricciones del actuador -------------------------
