@@ -218,6 +218,23 @@ class ConfigControl:
     PEND_NIVEL_AGRESIVA: float = 15.0
     RATE_PENDIENTE_MAX_HZ: float = 3.0
 
+    # --- Anticipacion por velocidad de nivel (NUEVO) --------
+    # El override antes solo miraba la POSICION del nivel: si venia
+    # subiendo a 15 %/min pero todavia estaba en 65 %, esperaba a
+    # cruzar 68 % para disparar, y para entonces el rate limit ya no
+    # alcanzaba a devolverlo antes del rebalse.
+    # Ahora la decision de override se toma con el nivel PROYECTADO
+    # T_ANTICIPACION_MIN minutos adelante, cuando la velocidad supera
+    # PEND_NIVEL_ALERTA. Asi:
+    #   - nivel 65 %, +15 %/min  -> proyeccion 30 s = 72.5 % -> dispara YA
+    #     con rate limit escalado por velocidad (paso ~3 Hz).
+    #   - nivel 65 %, estable    -> proyeccion = 65 % -> lazo de flujo manda.
+    #   - nivel 68 %, cayendo    -> proyeccion adelantada -> suelta antes.
+    # Solo se proyecta la pendiente que supera PEND_NIVEL_ALERTA (deadband
+    # de velocidad), para que el ruido de la medicion no dispare overrides.
+    T_ANTICIPACION_MIN: float = 0.5   # min: horizonte de proyeccion (30 s)
+    PEND_NIVEL_ALERTA:  float = 3.0   # %/min: umbral para activar anticipacion
+
     # --- Restricciones del actuador -------------------------
     RATE_LIMIT_HZ: float = 0.4
     HZ_MIN: float = 52.0    # ~120 m3/h con CURVA_ALIM (cierre bomba ~47.5 Hz)
@@ -291,13 +308,25 @@ class ControladorNivelFlujo:
     def _curva(self):
         return self.cfg.CURVA_ALIM if self.abierta else self.cfg.CURVA_COS
 
+    # ---- proyeccion del nivel a T_ANTICIPACION_MIN (NUEVO) ----
+    # Solo se proyecta el EXCESO de pendiente sobre PEND_NIVEL_ALERTA:
+    # de esa forma los cambios "normales" del nivel no adelantan la
+    # decision del override.
+    def _nivel_proyectado(self, nivel, pend_nivel):
+        cfg = self.cfg
+        if abs(pend_nivel) <= cfg.PEND_NIVEL_ALERTA:
+            return nivel
+        exceso = pend_nivel - np.sign(pend_nivel) * cfg.PEND_NIVEL_ALERTA
+        return nivel + exceso * cfg.T_ANTICIPACION_MIN
+
     # ---- rate limit adaptativo ----
     def _rate_limit(self, nivel, pend_nivel):
         cfg = self.cfg
         b_lo, b_hi = self._banda()
-        fuera = nivel > b_hi or nivel < b_lo
-        empeora = ((nivel > b_hi and pend_nivel > 0) or
-                   (nivel < b_lo and pend_nivel < 0))
+        n = self._nivel_proyectado(nivel, pend_nivel)   # NUEVO: usar proyeccion
+        fuera = n > b_hi or n < b_lo
+        empeora = ((n > b_hi and pend_nivel > 0) or
+                   (n < b_lo and pend_nivel < 0))
         if not (fuera and empeora):
             return cfg.RATE_LIMIT_HZ
         return float(np.interp(abs(pend_nivel),
@@ -333,28 +362,32 @@ class ControladorNivelFlujo:
         # convertir "error de m3/h" a Hz sobre la curva local
         return cfg.K_FLUJO_ERROR * err / max(m, 1e-6) * cfg.PASO_SEG   # incremental
 
-    # ---- error de nivel con enganche / histéresis ----
-    def _error_nivel(self, nivel):
+    # ---- error de nivel con enganche / histéresis + ANTICIPACION ----
+    # Usa el nivel PROYECTADO para decidir enganche y para calcular el
+    # error, asi el override arranca temprano cuando el nivel viene
+    # rapido, y suelta antes cuando se esta recuperando rapido.
+    def _error_nivel(self, nivel, pend_nivel=0.0):
         cfg = self.cfg
         h = cfg.HISTERESIS_BANDA_PCT
         b_lo, b_hi = self._banda()
+        n = self._nivel_proyectado(nivel, pend_nivel)
 
         if self.estado_override == 0:
-            if nivel > b_hi:
+            if n > b_hi:
                 self.estado_override = 1
-            elif nivel < b_lo:
+            elif n < b_lo:
                 self.estado_override = -1
             else:
                 return 0.0
 
         if self.estado_override == 1:
-            err = nivel - (b_hi - h)
+            err = n - (b_hi - h)
             if err <= 0.0:
                 self.estado_override = 0
                 return 0.0
             return err
 
-        err = nivel - (b_lo + h)
+        err = n - (b_lo + h)
         if err >= 0.0:
             self.estado_override = 0
             return 0.0
@@ -362,7 +395,7 @@ class ControladorNivelFlujo:
 
     # ---- aporte del lazo de nivel (override) ----
     def _aporte_nivel(self, nivel, pend_nivel=0.0):
-        err = self._error_nivel(nivel)
+        err = self._error_nivel(nivel, pend_nivel)
         if err == 0.0:
             return 0.0
         if self.cfg.MODO_OVERRIDE == "agresivo":

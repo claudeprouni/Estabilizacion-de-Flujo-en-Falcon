@@ -67,3 +67,54 @@ override.
    el bias acumule por 20-40 min: debería cerrar el error.
 4. Si el bias se satura en ±3 Hz sin cerrar el error, ajustar la curva
    `CURVA_ALIM` / `CURVA_COS` con puntos reales.
+
+---
+
+# Segundo cambio: pasos grandes cuando el nivel se mueve rápido
+
+## Motivo
+Con el override "puro" del cambio anterior, la decisión de disparar
+se tomaba sobre la POSICIÓN del nivel. Un nivel a 65 % subiendo a
+15 %/min no disparaba nada hasta cruzar 68 %; para entonces el rate
+limit no alcanzaba a devolverlo antes del rebalse. El diseño original
+buscaba pasos grandes ante subidas/bajadas rápidas — el override
+puro los perdía.
+
+## Solución: anticipación por velocidad
+La decisión de override ahora se toma con el nivel PROYECTADO
+`T_ANTICIPACION_MIN` minutos adelante:
+
+```
+nivel_proyectado = nivel + (pend_nivel − PEND_NIVEL_ALERTA · signo) · T_ANTICIPACION_MIN
+```
+
+Solo se proyecta el EXCESO de pendiente sobre `PEND_NIVEL_ALERTA`
+(deadband de velocidad, 3 %/min por defecto), así el ruido normal
+del nivel no dispara overrides falsos.
+
+Ejemplos (con `T_ANTICIPACION_MIN = 0.5` = 30 s):
+
+| nivel | pend_nivel | nivel_proyectado | override | rate limit |
+|-------|------------|------------------|----------|------------|
+| 65 %  | +15 %/min  | 65 + 12·0.5 = 71 | DISPARA  | ~3.0 Hz    |
+| 65 %  | +2 %/min   | 65 (sin proy.)   | inactivo | 0.4 Hz     |
+| 68 %  | −20 %/min  | 68 − 17·0.5 ≈ 60 | suelta   | 0.4 Hz     |
+| 45 %  | −10 %/min  | 45 − 7·0.5 = 41.5| inactivo | 0.4 Hz     |
+| 42 %  | −10 %/min  | 42 − 7·0.5 = 38.5| DISPARA  | ~2.4 Hz    |
+
+## Parámetros
+- `T_ANTICIPACION_MIN = 0.5` — horizonte de proyección. Subir para
+  respuestas más tempranas (pero más nerviosas); bajar si se ven
+  activaciones prematuras.
+- `PEND_NIVEL_ALERTA = 3.0` — deadband de velocidad. Por debajo, no
+  se anticipa nada. Subir si hay ruido de nivel; bajar para más
+  sensibilidad.
+
+## Interacción con lo anterior
+- El rate limit adaptativo (`PEND_NIVEL_SUAVE / AGRESIVA →
+  RATE_LIMIT_HZ / RATE_PENDIENTE_MAX_HZ`) sigue igual, pero ahora
+  también usa el nivel proyectado para decidir si escalar.
+- La histéresis (`HISTERESIS_BANDA_PCT`) opera sobre la proyección,
+  así el enganche/suelta también anticipa.
+- El lazo de flujo primario queda silenciado cuando el override
+  fira, igual que antes.
