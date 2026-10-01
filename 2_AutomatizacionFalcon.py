@@ -263,8 +263,14 @@ class ConfigControl:
     # Con K=0.03 y pend=1 %/min: aporte = 0.03 * 1 * (10/60) = 0.005 Hz
     # por paso de 10 s. En un minuto, Hz se mueve 0.03. Lento y suave.
     # Para desactivar: K_PEND_NIVEL = 0.0.
-    K_PEND_NIVEL: float = 0.03            # Hz por %/min por minuto de accion
-    ZONA_MUERTA_PEND_NIVEL: float = 0.3   # %/min: por debajo, no actua (filtra ruido)
+    # K_PEND_NIVEL subido 0.03 -> 0.1 (01/10 tarde):
+    # Con K=0.03 la constante de tiempo del lazo era 25 min, muy lenta
+    # comparada con la velocidad a la que varia el nivel (2-4 %/min).
+    # El integral no llegaba a adaptar el Hz antes de que el override
+    # disparara. Con K=0.1 la tau baja a ~8 min, en linea con las
+    # dinamicas del cajon. tau = A/(K*m) = 0.145/(0.1*11.41)
+    K_PEND_NIVEL: float = 0.1             # Hz por %/min por minuto (tau ~8 min)
+    ZONA_MUERTA_PEND_NIVEL: float = 0.3   # %/min: por debajo, no actua
 
     # --- Drift hacia HZ_NEUTRAL (OBSOLETO, dejado por compat) --
     # Reemplazado por K_PEND_NIVEL. Para reactivarlo poner un valor
