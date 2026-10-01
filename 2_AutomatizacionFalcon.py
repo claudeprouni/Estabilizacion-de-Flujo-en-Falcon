@@ -186,8 +186,8 @@ class ConfigControl:
     # --- Curva de la bomba por etapa (flujo = m*Hz + b) -----
     # Ajustada sobre 14 h en tramos con Hz estable (R2 0.84 / 0.70).
     # Usada para el feedforward del SP y para dimensionar el bias.
-    CURVA_ALIM = (10.4, -414.6)   # a 54 Hz -> 145 m3/h
-    CURVA_COS  = (8.9,  -316.2)   # a 54 Hz -> 163 m3/h
+    CURVA_ALIM = (11.41, -463.8)  # recalibrado 01/10 con 16411 muestras (R2=0.81). A 54 Hz -> 152 m3/h
+    CURVA_COS  = (10.61, -407.7)  # recalibrado 01/10 con 7196 muestras (R2=0.67). A 54 Hz -> 165 m3/h
 
     # --- Bias integrador (aprende del error de FLUJO) -------
     # Se aprende únicamente cuando el override está APAGADO,
@@ -260,7 +260,7 @@ class ConfigControl:
     # nivel toca el borde opuesto el Hz ya esta en el medio, no en 60.
     # Resultado esperado: amplitud de la oscilacion mucho menor.
     # Para desactivar: HZ_NEUTRAL = None.
-    HZ_NEUTRAL: float = 55.0              # Hz hacia el que converge en banda
+    HZ_NEUTRAL: float = 53.5              # Hz de equilibrio REAL medido en 72h de datos (Q_in media = 150 m3/h)
     HZ_DRIFT_PER_MIN: float = 0.1         # velocidad de convergencia (Hz/min)
 
     # --- Zona muerta del lazo de flujo (NUEVO) --------------
