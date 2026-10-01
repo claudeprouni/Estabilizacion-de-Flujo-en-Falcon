@@ -249,6 +249,20 @@ class ConfigControl:
 
     MODO_OVERRIDE: str = "progresivo"
 
+    # --- Drift hacia Hz neutro (NUEVO 01/10) -----------------
+    # Con override puro, el Hz termina atascado en los extremos (52 o 60)
+    # porque cada override lo manda a un limite y despues ahi se queda.
+    # El nivel entonces oscila entre bandas con amplitud grande.
+    # Este drift le da al Hz una "gravedad suave" hacia HZ_NEUTRAL:
+    # cuando el override esta apagado y estamos en alimentacion, el Hz
+    # se mueve lentamente hacia ese valor (ej. 0.1 Hz/min). Asi, despues
+    # de un override alto, el Hz baja gradualmente, y para cuando el
+    # nivel toca el borde opuesto el Hz ya esta en el medio, no en 60.
+    # Resultado esperado: amplitud de la oscilacion mucho menor.
+    # Para desactivar: HZ_NEUTRAL = None.
+    HZ_NEUTRAL: float = 55.0              # Hz hacia el que converge en banda
+    HZ_DRIFT_PER_MIN: float = 0.1         # velocidad de convergencia (Hz/min)
+
     # --- Zona muerta del lazo de flujo (NUEVO) --------------
     # Debajo de este error absoluto, el lazo primario NO mueve el Hz.
     # Combate el jitter de la medición de flujo (ruido ~2 m3/h) que
@@ -404,6 +418,20 @@ class ControladorNivelFlujo:
             return 0.0
         return err
 
+    # ---- drift suave hacia HZ_NEUTRAL (NUEVO) ----
+    # Solo actua cuando override esta apagado. No pide delta mayor que
+    # lo que puede moverse en un paso al ritmo HZ_DRIFT_PER_MIN.
+    def _aporte_drift(self):
+        cfg = self.cfg
+        if cfg.HZ_NEUTRAL is None:
+            return 0.0
+        err = cfg.HZ_NEUTRAL - self.hz_actual
+        paso_min = cfg.PASO_SEG / 60.0
+        aporte_max = cfg.HZ_DRIFT_PER_MIN * paso_min
+        if abs(err) < aporte_max:
+            return err
+        return float(np.sign(err) * aporte_max)
+
     # ---- aporte del lazo de nivel (override) ----
     # BUG arreglado 01/10: antes el freno podia revertir el signo del aporte
     # cuando el nivel se recuperaba rapido con el override todavia activo.
@@ -493,7 +521,13 @@ class ControladorNivelFlujo:
                     self.bias = float(np.clip(self.bias + d_bias,
                                               -cfg.BIAS_MAX_HZ, cfg.BIAS_MAX_HZ))
 
-        delta_solicitado = aporte_n + aporte_ref + aporte_f_err + aporte_f_pnd
+        # Drift suave hacia HZ_NEUTRAL: solo cuando override off, en alimentacion,
+        # y no estamos congelados por transicion. Es una gravedad lenta.
+        aporte_drift = 0.0
+        if aporte_n == 0.0 and self.abierta is True and not en_transicion:
+            aporte_drift = self._aporte_drift()
+
+        delta_solicitado = aporte_n + aporte_ref + aporte_f_err + aporte_f_pnd + aporte_drift
 
         # rate limit: si estamos en arranque de alimentacion, permitir
         # un paso mucho mas grande para saltar directo al Hz teorico.
@@ -524,7 +558,7 @@ class ControladorNivelFlujo:
                 f"Hz: {self.hz_actual:6.2f} | "
                 f"A.flujo: {aporte_f_total:+.3f} (err {aporte_f_err:+.3f} / "
                 f"pnd {aporte_f_pnd:+.3f} / ref {aporte_ref:+.3f}) | "
-                f"A.nivel: {aporte_n:+.3f} | "
+                f"A.nivel: {aporte_n:+.3f} | A.drift: {aporte_drift:+.3f} | "
                 f"bias {self.bias:+.2f} | rate {rate:.2f}"
                 + ("  [TRANSICION-CONGELADO]" if en_transicion else "")
                 + ("  [ARRANQUE-ALIM]" if en_arranque_alim else "")
@@ -544,6 +578,7 @@ class ControladorNivelFlujo:
             "aporte_ref": aporte_ref,
             "aporte_flujo": aporte_f_err + aporte_f_pnd + aporte_ref,
             "aporte_nivel": aporte_n,
+            "aporte_drift": aporte_drift,
             "delta_solicitado": delta_solicitado,
             "saturado_rate": abs(delta_solicitado) > rate,
             "override_activo": aporte_n != 0.0,
@@ -624,6 +659,9 @@ if en_arranque_alim[-1]:
     print(f"    >> EN ARRANQUE DE ALIMENTACION: rate limit = {cfg.RATE_ARRANQUE_HZ} Hz/paso")
 if cfg.FLUJO_SP is None:
     print("    MODO OVERRIDE PURO: Hz congelado dentro de banda")
+    if cfg.HZ_NEUTRAL is not None:
+        print(f"    -> Drift suave hacia HZ_NEUTRAL = {cfg.HZ_NEUTRAL} Hz "
+              f"a {cfg.HZ_DRIFT_PER_MIN} Hz/min cuando override off")
     print("    -> Hz solo se mueve por override de nivel (fuera de banda)")
 else:
     print(f"    Objetivo del lazo primario: FLUJO_SP = {cfg.FLUJO_SP:.0f} m3/h "
