@@ -249,19 +249,28 @@ class ConfigControl:
 
     MODO_OVERRIDE: str = "progresivo"
 
-    # --- Drift hacia Hz neutro (NUEVO 01/10) -----------------
-    # Con override puro, el Hz termina atascado en los extremos (52 o 60)
-    # porque cada override lo manda a un limite y despues ahi se queda.
-    # El nivel entonces oscila entre bandas con amplitud grande.
-    # Este drift le da al Hz una "gravedad suave" hacia HZ_NEUTRAL:
-    # cuando el override esta apagado y estamos en alimentacion, el Hz
-    # se mueve lentamente hacia ese valor (ej. 0.1 Hz/min). Asi, despues
-    # de un override alto, el Hz baja gradualmente, y para cuando el
-    # nivel toca el borde opuesto el Hz ya esta en el medio, no en 60.
-    # Resultado esperado: amplitud de la oscilacion mucho menor.
-    # Para desactivar: HZ_NEUTRAL = None.
-    HZ_NEUTRAL: float = 53.5              # Hz de equilibrio REAL medido en 72h de datos (Q_in media = 150 m3/h)
-    HZ_DRIFT_PER_MIN: float = 0.1         # velocidad de convergencia (Hz/min)
+    # --- Control INTEGRAL sobre pendiente del nivel (NUEVO 01/10 v2) ---
+    # Reemplaza al drift hacia HZ_NEUTRAL (que requeria calibracion).
+    # Filosofia: NO HAY SETPOINT NI DE FLUJO NI DE HZ. El Hz se mueve
+    # solo cuando el NIVEL se mueve. Cuando el nivel se queda quieto,
+    # el Hz se queda quieto donde este, en el equilibrio hidraulico real.
+    # ES AUTOCALIBRANTE.
+    #
+    #   pend_nivel > 0 (nivel sube)  -> Hz sube lento  (bombea mas)
+    #   pend_nivel < 0 (nivel baja)  -> Hz baja lento  (bombea menos)
+    #   pend_nivel ~ 0 (estable)     -> Hz quieto
+    #
+    # Con K=0.03 y pend=1 %/min: aporte = 0.03 * 1 * (10/60) = 0.005 Hz
+    # por paso de 10 s. En un minuto, Hz se mueve 0.03. Lento y suave.
+    # Para desactivar: K_PEND_NIVEL = 0.0.
+    K_PEND_NIVEL: float = 0.03            # Hz por %/min por minuto de accion
+    ZONA_MUERTA_PEND_NIVEL: float = 0.3   # %/min: por debajo, no actua (filtra ruido)
+
+    # --- Drift hacia HZ_NEUTRAL (OBSOLETO, dejado por compat) --
+    # Reemplazado por K_PEND_NIVEL. Para reactivarlo poner un valor
+    # numerico en HZ_NEUTRAL (ej 53.5). Si HZ_NEUTRAL=None, no actua.
+    HZ_NEUTRAL = None                     # None = desactivado
+    HZ_DRIFT_PER_MIN: float = 0.1
 
     # --- Zona muerta del lazo de flujo (NUEVO) --------------
     # Debajo de este error absoluto, el lazo primario NO mueve el Hz.
@@ -432,6 +441,24 @@ class ControladorNivelFlujo:
             return err
         return float(np.sign(err) * aporte_max)
 
+    # ---- control INTEGRAL sobre pendiente del nivel (NUEVO v2) ----
+    # Si el nivel sube, aumenta Hz. Si baja, lo disminuye. Si el nivel
+    # no se mueve, no toca el Hz. ES AUTOCALIBRANTE: encuentra el Hz
+    # de equilibrio hidraulico solo, para cualquier Q_in.
+    def _aporte_integral_nivel(self, pend_nivel):
+        cfg = self.cfg
+        if cfg.K_PEND_NIVEL <= 0:
+            return 0.0
+        # Requiere al menos 1 min de buffer de nivel para pendiente confiable
+        if len(self._buf_nivel) < 6:
+            return 0.0
+        # Zona muerta: filtrar ruido de medicion y micro-variaciones
+        if abs(pend_nivel) < cfg.ZONA_MUERTA_PEND_NIVEL:
+            return 0.0
+        # Signo correcto: pend>0 (nivel sube) -> aporte>0 (subir Hz)
+        paso_min = cfg.PASO_SEG / 60.0
+        return float(cfg.K_PEND_NIVEL * pend_nivel * paso_min)
+
     # ---- aporte del lazo de nivel (override) ----
     # BUG arreglado 01/10: antes el freno podia revertir el signo del aporte
     # cuando el nivel se recuperaba rapido con el override todavia activo.
@@ -521,13 +548,17 @@ class ControladorNivelFlujo:
                     self.bias = float(np.clip(self.bias + d_bias,
                                               -cfg.BIAS_MAX_HZ, cfg.BIAS_MAX_HZ))
 
-        # Drift suave hacia HZ_NEUTRAL: solo cuando override off, en alimentacion,
-        # y no estamos congelados por transicion. Es una gravedad lenta.
+        # Control integral del nivel + drift legacy: solo con override off,
+        # en alimentacion, y fuera de transicion. El integral mueve el Hz
+        # solo si el nivel se mueve (autocalibrante). El drift sigue
+        # disponible como respaldo si HZ_NEUTRAL se setea a un numero.
+        aporte_integral = 0.0
         aporte_drift = 0.0
         if aporte_n == 0.0 and self.abierta is True and not en_transicion:
+            aporte_integral = self._aporte_integral_nivel(pend_nivel)
             aporte_drift = self._aporte_drift()
 
-        delta_solicitado = aporte_n + aporte_ref + aporte_f_err + aporte_f_pnd + aporte_drift
+        delta_solicitado = aporte_n + aporte_ref + aporte_f_err + aporte_f_pnd + aporte_drift + aporte_integral
 
         # rate limit: si estamos en arranque de alimentacion, permitir
         # un paso mucho mas grande para saltar directo al Hz teorico.
@@ -558,7 +589,7 @@ class ControladorNivelFlujo:
                 f"Hz: {self.hz_actual:6.2f} | "
                 f"A.flujo: {aporte_f_total:+.3f} (err {aporte_f_err:+.3f} / "
                 f"pnd {aporte_f_pnd:+.3f} / ref {aporte_ref:+.3f}) | "
-                f"A.nivel: {aporte_n:+.3f} | A.drift: {aporte_drift:+.3f} | "
+                f"A.nivel: {aporte_n:+.3f} | A.int: {aporte_integral:+.4f} | A.drift: {aporte_drift:+.3f} | "
                 f"bias {self.bias:+.2f} | rate {rate:.2f}"
                 + ("  [TRANSICION-CONGELADO]" if en_transicion else "")
                 + ("  [ARRANQUE-ALIM]" if en_arranque_alim else "")
@@ -579,6 +610,7 @@ class ControladorNivelFlujo:
             "aporte_flujo": aporte_f_err + aporte_f_pnd + aporte_ref,
             "aporte_nivel": aporte_n,
             "aporte_drift": aporte_drift,
+            "aporte_integral": aporte_integral,
             "delta_solicitado": delta_solicitado,
             "saturado_rate": abs(delta_solicitado) > rate,
             "override_activo": aporte_n != 0.0,
@@ -659,10 +691,13 @@ if en_arranque_alim[-1]:
     print(f"    >> EN ARRANQUE DE ALIMENTACION: rate limit = {cfg.RATE_ARRANQUE_HZ} Hz/paso")
 if cfg.FLUJO_SP is None:
     print("    MODO OVERRIDE PURO: Hz congelado dentro de banda")
+    if cfg.K_PEND_NIVEL > 0:
+        print(f"    -> Control INTEGRAL de nivel activo: K={cfg.K_PEND_NIVEL} Hz/(%/min)/min")
+        print(f"       Zona muerta pendiente: {cfg.ZONA_MUERTA_PEND_NIVEL} %/min (filtro ruido)")
+        print(f"       AUTOCALIBRANTE: el Hz converge al equilibrio hidraulico solo")
     if cfg.HZ_NEUTRAL is not None:
-        print(f"    -> Drift suave hacia HZ_NEUTRAL = {cfg.HZ_NEUTRAL} Hz "
-              f"a {cfg.HZ_DRIFT_PER_MIN} Hz/min cuando override off")
-    print("    -> Hz solo se mueve por override de nivel (fuera de banda)")
+        print(f"    -> Drift legacy a HZ_NEUTRAL = {cfg.HZ_NEUTRAL} Hz (ADEMAS del integral)")
+    print("    -> Override de nivel sigue activo fuera de banda")
 else:
     print(f"    Objetivo del lazo primario: FLUJO_SP = {cfg.FLUJO_SP:.0f} m3/h "
           f"(Hz teorico ~ {(cfg.FLUJO_SP - cfg.CURVA_ALIM[1]) / cfg.CURVA_ALIM[0]:.1f} en alim)")
