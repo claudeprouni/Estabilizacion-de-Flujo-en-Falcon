@@ -177,7 +177,7 @@ class ConfigControl:
     BANDA_HI: float = 75.0
 
     # Histéresis: entra en el borde, suelta al recuperar este margen.
-    HISTERESIS_BANDA_PCT: float = 4.0    # subido 2 -> 4: suelta con mas margen
+    HISTERESIS_BANDA_PCT: float = 6.0    # subido 4 -> 6: zona muerta mas ancha, sin chatter
 
     # Límites duros de seguridad (informativos).
     SEG_LO: float = 30.0
@@ -220,7 +220,7 @@ class ConfigControl:
     PASO_SEG: int = 10
 
     # --- Salto por pendiente de nivel (override rápido) -----
-    VENTANA_NIVEL_SEG: int = 30
+    VENTANA_NIVEL_SEG: int = 90           # subido 30 -> 90: pendiente mucho mas estable
     PEND_NIVEL_SUAVE: float = 2.0
     PEND_NIVEL_AGRESIVA: float = 15.0
     RATE_PENDIENTE_MAX_HZ: float = 1.0    # bajado 3.0 -> 1.0: sin brincos por pendiente nivel
@@ -315,12 +315,16 @@ class ControladorNivelFlujo:
     def _curva(self):
         return self.cfg.CURVA_ALIM if self.abierta else self.cfg.CURVA_COS
 
-    # ---- proyeccion del nivel a T_ANTICIPACION_MIN (NUEVO) ----
-    # Solo se proyecta el EXCESO de pendiente sobre PEND_NIVEL_ALERTA:
-    # de esa forma los cambios "normales" del nivel no adelantan la
-    # decision del override.
+    # ---- proyeccion del nivel a T_ANTICIPACION_MIN ----
+    # En MODO OVERRIDE PURO (FLUJO_SP=None) no se proyecta: la filosofia es
+    # "no mover Hz hasta que el nivel se salga de verdad". La anticipacion
+    # haria lo contrario (predecir y mover antes), y con ventanas cortas
+    # de pendiente eso disparaba overrides falsos por ruido -> Hz oscilaba
+    # aunque el nivel estuviera estable.
     def _nivel_proyectado(self, nivel, pend_nivel):
         cfg = self.cfg
+        if cfg.FLUJO_SP is None:
+            return nivel                       # modo puro: solo el valor actual
         if abs(pend_nivel) <= cfg.PEND_NIVEL_ALERTA:
             return nivel
         exceso = pend_nivel - np.sign(pend_nivel) * cfg.PEND_NIVEL_ALERTA
