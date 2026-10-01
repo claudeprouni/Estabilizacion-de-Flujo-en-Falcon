@@ -405,6 +405,14 @@ class ControladorNivelFlujo:
         return err
 
     # ---- aporte del lazo de nivel (override) ----
+    # BUG arreglado 01/10: antes el freno podia revertir el signo del aporte
+    # cuando el nivel se recuperaba rapido con el override todavia activo.
+    # Resultado observado: override ALTO con el nivel bajando a -2 %/min
+    # daba aporte = 0.25*7.6 - 2.0*2.0 = -2.1 Hz -> el Hz BAJABA aunque
+    # el override pidiera lo contrario. Ahora el freno solo puede reducir
+    # el aporte a CERO, no revertirlo. Mientras el override este activo,
+    # el Hz nunca va en direccion opuesta a lo que pide (puede quedarse
+    # quieto, pero no retroceder).
     def _aporte_nivel(self, nivel, pend_nivel=0.0):
         err = self._error_nivel(nivel, pend_nivel)
         if err == 0.0:
@@ -414,7 +422,14 @@ class ControladorNivelFlujo:
         freno = 0.0
         if (err > 0 and pend_nivel < 0) or (err < 0 and pend_nivel > 0):
             freno = self.cfg.GANANCIA_NIVEL_VELOC * pend_nivel
-        return self.cfg.GANANCIA_NIVEL_ERROR * err + freno
+        aporte = self.cfg.GANANCIA_NIVEL_ERROR * err + freno
+        # Clamp: no cruzar el cero. El freno puede frenar o detener el
+        # empuje, nunca invertirlo.
+        if err > 0 and aporte < 0.0:
+            return 0.0
+        if err < 0 and aporte > 0.0:
+            return 0.0
+        return aporte
 
     # ---- ciclo de control ----
     def paso(self, timestamp_seg: float, nivel: float, flujo: float,
